@@ -1,0 +1,53 @@
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: reduce-watermark-bug
+spec:
+  vertices:
+    - name: in
+      source:
+        generator:
+          rpu: 5
+          duration: 1s
+          msgSize: 8
+    - name: passthrough
+      udf:
+        container:
+          image: python-udf:latest
+          imagePullPolicy: Never
+          env:
+            - name: UDF_MODE
+              value: map
+    - name: counter
+      partitions: 1
+      limits:
+        readBatchSize: 1
+      udf:
+        container:
+          image: python-udf:latest
+          imagePullPolicy: Never
+          env:
+            - name: UDF_MODE
+              value: reduce
+        groupBy:
+          window:
+            sliding:
+              length: 60s
+              slide: 10s
+              streaming: true
+          keyed: true
+          storage:
+            persistentVolumeClaim:
+              volumeSize: 1Gi
+              accessMode: ReadWriteOncePod
+    - name: out
+      sink:
+        log: {}
+  edges:
+    - from: in
+      to: passthrough
+    - from: passthrough
+      to: counter
+    - from: counter
+      to: out
+
