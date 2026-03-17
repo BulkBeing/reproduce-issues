@@ -1,0 +1,196 @@
+apiVersion: numaflow.numaproj.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: testing-all
+spec:
+  sideInputs:
+    - name: ticker
+      container:
+        image: all-udfs:v1
+        imagePullPolicy: Never
+        env:
+          - name: NUMAFLOW_UDF_TYPE
+            value: side_input
+      trigger:
+        schedule: "*/30 * * * * *"
+
+  vertices:
+    # ── Source ──────────────────────────────────────────────────
+    - name: udsource
+      source:
+        udsource:
+          container:
+            image: all-udfs:v1
+            imagePullPolicy: Never
+            env:
+              - name: NUMAFLOW_UDF_TYPE
+                value: sourcer
+        transformer:
+          container:
+            image: all-udfs:v1
+            imagePullPolicy: Never
+            env:
+              - name: NUMAFLOW_UDF_TYPE
+                value: source_transform
+
+    # ── Map variants (fan-out from source) ─────────────────────
+    - name: async-map
+      udf:
+        container:
+          image: all-udfs:v1
+          imagePullPolicy: Never
+          env:
+            - name: NUMAFLOW_UDF_TYPE
+              value: map_async
+
+    - name: batch-map
+      udf:
+        container:
+          image: all-udfs:v1
+          imagePullPolicy: Never
+          env:
+            - name: NUMAFLOW_UDF_TYPE
+              value: batch_map
+
+    - name: map-stream
+      udf:
+        container:
+          image: all-udfs:v1
+          imagePullPolicy: Never
+          env:
+            - name: NUMAFLOW_UDF_TYPE
+              value: map_stream
+
+    # ── Reduce (converges from all 3 map variants) ─────────────
+    - name: reduce
+      partitions: 1
+      udf:
+        container:
+          image: all-udfs:v1
+          imagePullPolicy: Never
+          env:
+            - name: NUMAFLOW_UDF_TYPE
+              value: reduce
+        groupBy:
+          window:
+            fixed:
+              length: 10s
+          keyed: true
+          storage:
+            persistentVolumeClaim:
+              volumeSize: 2Gi
+              accessMode: ReadWriteOnce
+
+    # ── Reduce-stream ──────────────────────────────────────────
+    - name: reduce-stream
+      partitions: 1
+      udf:
+        container:
+          image: all-udfs:v1
+          imagePullPolicy: Never
+          env:
+            - name: NUMAFLOW_UDF_TYPE
+              value: reduce_stream
+        groupBy:
+          window:
+            fixed:
+              length: 10s
+              streaming: true
+          keyed: true
+          storage:
+            persistentVolumeClaim:
+              volumeSize: 2Gi
+              accessMode: ReadWriteOnce
+
+    # ── Accumulator ────────────────────────────────────────────
+    - name: accumulator
+      udf:
+        container:
+          image: all-udfs:v1
+          imagePullPolicy: Never
+          env:
+            - name: NUMAFLOW_UDF_TYPE
+              value: accumulator
+        groupBy:
+          window:
+            accumulator:
+              timeout: 10s
+          keyed: true
+          storage:
+            persistentVolumeClaim:
+              volumeSize: 1Gi
+              accessMode: ReadWriteOnce
+
+    # ── Multiproc map ──────────────────────────────────────────
+    - name: multiproc-map
+      udf:
+        container:
+          image: all-udfs:v1
+          imagePullPolicy: Never
+          env:
+            - name: NUMAFLOW_UDF_TYPE
+              value: map_multiproc
+            - name: NUM_CPU_MULTIPROC
+              value: "2"
+
+    # ── Sync map (reads side-input) ────────────────────────────
+    - name: sync-map
+      sideInputs:
+        - ticker
+      udf:
+        container:
+          image: all-udfs:v1
+          imagePullPolicy: Never
+          env:
+            - name: NUMAFLOW_UDF_TYPE
+              value: map_sync
+
+    # ── Sink ───────────────────────────────────────────────────
+    - name: ud-sink
+      sink:
+        udsink:
+          container:
+            image: all-udfs:v1
+            imagePullPolicy: Never
+            env:
+              - name: NUMAFLOW_UDF_TYPE
+                value: sink
+
+  edges:
+    # Source → 3 map variants (fan-out)
+    - from: udsource
+      to: async-map
+    - from: udsource
+      to: batch-map
+    - from: udsource
+      to: map-stream
+
+    # 3 map variants → reduce (converge)
+    - from: async-map
+      to: reduce
+    - from: batch-map
+      to: reduce
+    - from: map-stream
+      to: reduce
+
+    # Reduce → multiproc-map + reduce-stream
+    - from: reduce
+      to: multiproc-map
+    - from: reduce
+      to: reduce-stream
+
+    # Reduce-stream → accumulator
+    - from: reduce-stream
+      to: accumulator
+
+    # Multiproc-map → sync-map
+    - from: multiproc-map
+      to: sync-map
+
+    # Accumulator → sync-map
+    - from: accumulator
+      to: sync-map
+
+    # Sync-map → sink
+    - from: sync-map
+      to: ud-sink
